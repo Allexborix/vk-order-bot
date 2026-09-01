@@ -168,12 +168,14 @@ app.post("/callback", async (req, res) => {
   }
 
   if (data.type === "message_new") {
-    const message = data.object;
+  const message =
+    data.object?.message ||
+    data.object;
 
-    const userId = message.from_id;
-    const text = (message.text || "").trim();
+  const userId = message.from_id;
+  const text = (message.text || "").trim();
 
-    console.log("Новое сообщение:", userId, text);
+  console.log("Новое сообщение:", userId, text);
 
     try {
       // Первое сообщение
