@@ -1,8 +1,4 @@
-from pathlib import Path
-
-# The previous file accidentally included the Python helper lines at the top.
-# Recreate a clean JavaScript file with only the bot code.
-code = r'''const express = require("express");
+const express = require("express");
 
 const app = express();
 app.use(express.json());
@@ -452,8 +448,3 @@ app.post("/callback", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`VK Order Bot запущен на порту ${PORT}`);
 });
-'''
-
-path = Path("/mnt/data/server.js")
-path.write_text(code, encoding="utf-8")
-print(f"Исправленный файл готов: {path}")
