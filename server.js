@@ -259,7 +259,7 @@ app.post("/callback", async (req, res) => {
 
       const text = (message.text || "").trim();
 
-      console.log("Новое сообщение:", userId, text);
+      console.log("ПОЛНОЕ СООБЩЕНИЕ:", JSON.stringify(message, null, 2));
 
       // =========================
       // Отмена заказа
