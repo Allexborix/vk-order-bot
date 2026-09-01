@@ -186,6 +186,67 @@ function quantityKeyboard() {
   };
 }
 
+
+function adminOrderKeyboard(orderId) {
+  return {
+    one_time: false,
+    inline: true,
+    buttons: [
+      [
+        {
+          action: {
+            type: "callback",
+            label: "🟢 Принять заказ",
+            payload: JSON.stringify({
+              command: "accept_order",
+              order_id: orderId
+            })
+          },
+          color: "positive"
+        },
+        {
+          action: {
+            type: "callback",
+            label: "🔴 Отклонить",
+            payload: JSON.stringify({
+              command: "reject_order",
+              order_id: orderId
+            })
+          },
+          color: "negative"
+        }
+      ],
+      [
+        {
+          action: {
+            type: "callback",
+            label: "💬 Связаться с клиентом",
+            payload: JSON.stringify({
+              command: "contact_client",
+              order_id: orderId
+            })
+          },
+          color: "primary"
+        }
+      ]
+    ]
+  };
+}
+
+async function answerCallbackEvent(eventId, text) {
+  if (!eventId) return;
+
+  await vkMethod("messages.sendMessageEventAnswer", {
+    event_id: eventId,
+    user_id: ADMIN_ID,
+    peer_id: ADMIN_ID,
+    event_data: JSON.stringify({
+      type: "show_snackbar",
+      text
+    })
+  });
+}
+
 async function startOrder(userId, type) {
   users[userId] = {
     step: "photo",
@@ -226,6 +287,13 @@ function getBestPhotoUrl(message) {
   return photo.orig_photo?.url || null;
 }
 
+
+const orders = {};
+
+function makeOrderId() {
+  return `${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+}
+
 app.post("/callback", async (req, res) => {
   const data = req.body;
 
@@ -238,6 +306,81 @@ app.post("/callback", async (req, res) => {
   if (VK_SECRET && data.secret !== VK_SECRET) {
     console.log("Неверный secret");
     return res.status(403).send("forbidden");
+  }
+
+  // Нажатия inline-кнопок администратором
+  if (data.type === "message_event") {
+    try {
+      let payload = data.object?.payload;
+
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch {
+          payload = {};
+        }
+      }
+
+      const orderId = payload?.order_id;
+      const command = payload?.command;
+      const order = orderId ? orders[orderId] : null;
+
+      if (!order) {
+        await answerCallbackEvent(data.event_id, "Заявка уже обработана или не найдена");
+        return res.send("ok");
+      }
+
+      if (command === "accept_order") {
+        order.status = "Принят";
+
+        await sendMessage(
+          order.userId,
+          "🧡 Ваш заказ принят!\n\nМы начинаем его подготовку. Скоро свяжемся с вами, чтобы обсудить детали и стоимость."
+        );
+
+        await sendMessage(
+          ADMIN_ID,
+          `🟢 Заказ ${orderId} принят.\n\nКлиент: ${order.name}\nИзделие: ${order.type}`
+        );
+
+        await answerCallbackEvent(data.event_id, "Заказ принят 🟢");
+      }
+
+      if (command === "reject_order") {
+        order.status = "Отклонён";
+
+        await sendMessage(
+          order.userId,
+          "Спасибо за обращение 🧡\n\nК сожалению, сейчас мы не можем принять этот заказ.\n\nЕсли обстоятельства изменятся — будем рады вашему обращению."
+        );
+
+        await sendMessage(
+          ADMIN_ID,
+          `🔴 Заказ ${orderId} отклонён.\n\nКлиент: ${order.name}\nИзделие: ${order.type}`
+        );
+
+        await answerCallbackEvent(data.event_id, "Заказ отклонён 🔴");
+      }
+
+      if (command === "contact_client") {
+        order.status = order.status || "Новая";
+
+        await answerCallbackEvent(
+          data.event_id,
+          `VK ID клиента: ${order.userId}`
+        );
+
+        await sendMessage(
+          ADMIN_ID,
+          `💬 Клиент для связи:\n\n👤 ${order.name}\n🔗 VK ID: ${order.userId}\n\nОткройте диалог с клиентом в сообществе.`
+        );
+      }
+
+      return res.send("ok");
+    } catch (error) {
+      console.error("Ошибка обработки кнопки:", error);
+      return res.send("ok");
+    }
   }
 
   if (data.type !== "message_new") {
@@ -400,18 +543,38 @@ app.post("/callback", async (req, res) => {
     if (user.step === "contact") {
       user.contact = text;
 
+      const orderId = makeOrderId();
+
+      orders[orderId] = {
+        userId,
+        type: user.type,
+        quantity: user.quantity,
+        details: user.details,
+        name: user.name,
+        contact: user.contact,
+        photo: user.photo,
+        status: "Новая",
+        createdAt: new Date().toISOString()
+      };
+
       const orderText =
         `🆕 НОВАЯ ЗАЯВКА\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🆔 Заказ: ${orderId}\n\n` +
         `📦 Изделие:\n${user.type}\n\n` +
         `🔢 Количество:\n${user.quantity}\n\n` +
         `💬 Пожелания:\n${user.details || "Не указаны"}\n\n` +
         `👤 Имя:\n${user.name}\n\n` +
         `📱 Контакт:\n${user.contact}\n\n` +
         `🔗 VK ID клиента:\n${userId}\n\n` +
+        `📌 Статус: Новая\n\n` +
         `━━━━━━━━━━━━━━━━━━`;
 
-      await sendMessage(ADMIN_ID, orderText);
+      await sendMessage(
+        ADMIN_ID,
+        orderText,
+        adminOrderKeyboard(orderId)
+      );
 
       if (user.photo) {
         const photoResult = await sendMessage(
@@ -421,10 +584,7 @@ app.post("/callback", async (req, res) => {
           user.photo
         );
 
-        console.log(
-          "Результат отправки фото админу:",
-          photoResult
-        );
+        console.log("Результат отправки фото админу:", photoResult);
       }
 
       await sendMessage(
