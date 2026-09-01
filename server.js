@@ -233,6 +233,56 @@ function adminOrderKeyboard(orderId) {
   };
 }
 
+
+function adminStatusKeyboard(orderId) {
+  return {
+    one_time: false,
+    inline: true,
+    buttons: [
+      [
+        {
+          action: {
+            type: "callback",
+            label: "🔨 В работе",
+            payload: JSON.stringify({
+              command: "status",
+              status: "В работе",
+              order_id: orderId
+            })
+          },
+          color: "primary"
+        },
+        {
+          action: {
+            type: "callback",
+            label: "✅ Готов",
+            payload: JSON.stringify({
+              command: "status",
+              status: "Готов",
+              order_id: orderId
+            })
+          },
+          color: "positive"
+        }
+      ],
+      [
+        {
+          action: {
+            type: "callback",
+            label: "📦 Выдан",
+            payload: JSON.stringify({
+              command: "status",
+              status: "Выдан",
+              order_id: orderId
+            })
+          },
+          color: "secondary"
+        }
+      ]
+    ]
+  };
+}
+
 async function answerCallbackEvent(eventId, text) {
   if (!eventId) return;
 
@@ -330,6 +380,49 @@ app.post("/callback", async (req, res) => {
         return res.send("ok");
       }
 
+      if (command === "status") {
+        const allowedStatuses = ["В работе", "Готов", "Выдан"];
+
+        if (!allowedStatuses.includes(payload?.status)) {
+          await answerCallbackEvent(data.event_id, "Неизвестный статус");
+          return res.send("ok");
+        }
+
+        order.status = payload.status;
+
+        const clientMessages = {
+          "В работе":
+            "🔨 Ваш заказ перешёл в работу!\n\nМы уже занимаемся его изготовлением 🧡",
+          "Готов":
+            "✅ Ваш заказ готов!\n\nСкоро свяжемся с вами, чтобы обсудить получение 🧡",
+          "Выдан":
+            "📦 Ваш заказ отмечен как выданный.\n\nСпасибо за заказ! Будем рады видеть вас снова 🧡"
+        };
+
+        await sendMessage(
+          order.userId,
+          clientMessages[order.status]
+        );
+
+        await sendMessage(
+          ADMIN_ID,
+          `📌 Статус заказа ${orderId} изменён.\n\n` +
+          `Новый статус: ${order.status}\n` +
+          `Клиент: ${order.name}\n` +
+          `Изделие: ${order.type}`,
+          order.status === "Выдан"
+            ? null
+            : adminStatusKeyboard(orderId)
+        );
+
+        await answerCallbackEvent(
+          data.event_id,
+          `Статус: ${order.status}`
+        );
+
+        return res.send("ok");
+      }
+
       if (command === "accept_order") {
         order.status = "Принят";
 
@@ -340,7 +433,8 @@ app.post("/callback", async (req, res) => {
 
         await sendMessage(
           ADMIN_ID,
-          `🟢 Заказ ${orderId} принят.\n\nКлиент: ${order.name}\nИзделие: ${order.type}`
+          `🟢 Заказ ${orderId} принят.\n\nКлиент: ${order.name}\nИзделие: ${order.type}\n\nТеперь можно менять статус:`,
+          adminStatusKeyboard(orderId)
         );
 
         await answerCallbackEvent(data.event_id, "Заказ принят 🟢");
