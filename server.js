@@ -511,16 +511,15 @@ app.post("/callback", async (req, res) => {
           orderText
         );
 
-        // Если есть фото — отправляем его отдельным сообщением
-        if (user.photo) {
+        // Пересылаем админу исходное сообщение с фотографией
+if (user.photoMessage) {
 
-          await sendMessage(
-            ADMIN_ID,
-            "📸 Фото / пример к заказу:",
-            null,
-            user.photo
-          );
-        }
+  await forwardMessageToAdmin(
+    ADMIN_ID,
+    user.photoMessage.peer_id,
+    user.photoMessage.conversation_message_id
+  );
+}
 
         // Клиенту
         await sendMessage(
