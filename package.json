@@ -1,0 +1,12 @@
+{
+  "name": "vk-order-bot",
+  "version": "1.0.0",
+  "description": "Бот для приема заказов ВК",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
