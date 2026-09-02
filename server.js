@@ -41,7 +41,8 @@ if (
 }
 
 const DB_FILE = path.join(__dirname, "orders.json");
-const users = {};
+const processedEvents = new Set();
+const processingEvents = new Set();
 let db = { orders: [], stats: { created: 0, accepted: 0, rejected: 0, completed: 0, revenue: 0 } };
 
 function loadDb() {
@@ -335,6 +336,20 @@ async function sendNewOrderPush(order) {
 
 app.post("/callback", async (req, res) => {
   const data = req.body;
+    if (data.type !== "confirmation" && data.event_id) {
+    if (processedEvents.has(data.event_id)) {
+      console.log("Повторное VK-событие пропущено:", data.event_id);
+      return res.send("ok");
+    }
+
+    processedEvents.add(data.event_id);
+
+    // Чтобы Set не рос бесконечно.
+    if (processedEvents.size > 1000) {
+      const firstEvent = processedEvents.values().next().value;
+      processedEvents.delete(firstEvent);
+    }
+  }
 
   if (data.type === "confirmation") return res.send(VK_CONFIRMATION_CODE);
   if (VK_SECRET && data.secret !== VK_SECRET) return res.status(403).send("forbidden");
