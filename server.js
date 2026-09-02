@@ -41,9 +41,19 @@ if (
 }
 
 const DB_FILE = path.join(__dirname, "orders.json");
+const users = {};
 const processedEvents = new Set();
-const processingEvents = new Set();
-let db = { orders: [], stats: { created: 0, accepted: 0, rejected: 0, completed: 0, revenue: 0 } };
+
+let db = {
+  orders: [],
+  stats: {
+    created: 0,
+    accepted: 0,
+    rejected: 0,
+    completed: 0,
+    revenue: 0
+  }
+};
 
 function loadDb() {
   try {
