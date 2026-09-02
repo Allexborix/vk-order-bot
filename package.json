@@ -1,12 +1,16 @@
 {
   "name": "vk-order-bot-v2",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "VK order bot with mini CRM",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "firebase-admin": "^14.3.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
