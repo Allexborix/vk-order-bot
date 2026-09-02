@@ -1,704 +1,262 @@
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_ID = "252564307";
-
 const VK_TOKEN = process.env.VK_TOKEN;
 const VK_SECRET = process.env.VK_SECRET;
 const VK_CONFIRMATION_CODE = process.env.VK_CONFIRMATION_CODE;
+const CRM_KEY = process.env.CRM_KEY || "change-me";
 
+const DB_FILE = path.join(__dirname, "orders.json");
 const users = {};
+let db = { orders: [], stats: { created: 0, accepted: 0, rejected: 0, completed: 0, revenue: 0 } };
 
-app.get("/", (req, res) => {
-  res.send("VK Order Bot is running!");
+function loadDb() {
+  try {
+    if (fs.existsSync(DB_FILE)) db = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+  } catch (e) { console.error("DB load:", e); }
+}
+function saveDb() {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf8");
+  } catch (e) { console.error("DB save:", e); }
+}
+loadDb();
+
+app.use("/admin", (req, res, next) => {
+  if (req.path === "/login") return next();
+  if (req.headers["x-crm-key"] === CRM_KEY || req.query.key === CRM_KEY) return next();
+  return res.status(401).json({ error: "CRM key required" });
 });
+
+app.get("/", (req, res) => res.send("VK Order Bot 2.0 is running!"));
+app.get("/admin/login", (req, res) => res.sendFile(path.join(__dirname, "public", "admin.html")));
+app.get("/admin/data", (req, res) => res.json(db));
 
 async function vkMethod(method, params = {}) {
   const body = new URLSearchParams();
-
   body.append("access_token", VK_TOKEN);
   body.append("v", "5.199");
-
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null) {
-      body.append(key, String(value));
-    }
-  }
-
-  const response = await fetch(`https://api.vk.com/method/${method}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) body.append(k, String(v));
+  const r = await fetch(`https://api.vk.com/method/${method}`, {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body
   });
-
-  const result = await response.json();
-
-  if (result.error) {
-    console.error(`VK API error (${method}):`, result.error);
-  }
-
+  const result = await r.json();
+  if (result.error) console.error(`VK ${method}:`, result.error);
   return result;
 }
 
 async function sendMessage(userId, message, keyboard = null, attachment = null) {
-  const params = {
-    user_id: userId,
-    message,
-    random_id: Math.floor(Math.random() * 2147483647)
-  };
-
-  if (keyboard) {
-    params.keyboard = JSON.stringify(keyboard);
-  }
-
-  if (attachment) {
-    params.attachment = attachment;
-  }
-
-  const result = await vkMethod("messages.send", params);
-
-  console.log("VK messages.send:", result.response ?? result.error ?? result);
-
-  return result;
+  const p = { user_id: userId, message, random_id: Math.floor(Math.random() * 2147483647) };
+  if (keyboard) p.keyboard = JSON.stringify(keyboard);
+  if (attachment) p.attachment = attachment;
+  return vkMethod("messages.send", p);
 }
 
 async function uploadClientPhoto(photoUrl) {
   if (!photoUrl) return null;
-
   try {
-    console.log("Скачиваем фото клиента...");
-
-    const photoResponse = await fetch(photoUrl);
-
-    if (!photoResponse.ok) {
-      throw new Error(`Не удалось скачать фото: HTTP ${photoResponse.status}`);
-    }
-
-    const arrayBuffer = await photoResponse.arrayBuffer();
-
-    const uploadServer = await vkMethod("photos.getMessagesUploadServer");
-
-    if (!uploadServer.response?.upload_url) {
-      throw new Error("VK не вернул upload_url");
-    }
-
+    const r = await fetch(photoUrl);
+    if (!r.ok) throw new Error(`photo HTTP ${r.status}`);
+    const buf = await r.arrayBuffer();
+    const server = await vkMethod("photos.getMessagesUploadServer");
+    if (!server.response?.upload_url) throw new Error("no upload_url");
     const form = new FormData();
-
-    const blob = new Blob([arrayBuffer], {
-      type: photoResponse.headers.get("content-type") || "image/jpeg"
-    });
-
-    form.append("photo", blob, "order-photo.jpg");
-
-    console.log("Загружаем фото в VK...");
-
-    const uploadResponse = await fetch(uploadServer.response.upload_url, {
-      method: "POST",
-      body: form
-    });
-
-    const uploadResult = await uploadResponse.json();
-
-    if (!uploadResult.server || !uploadResult.photo || !uploadResult.hash) {
-      console.error("Ответ загрузки фото:", uploadResult);
-      throw new Error("VK не принял загруженную фотографию");
-    }
-
-    const saveResult = await vkMethod("photos.saveMessagesPhoto", {
-      server: uploadResult.server,
-      photo: uploadResult.photo,
-      hash: uploadResult.hash
-    });
-
-    if (!saveResult.response?.[0]) {
-      throw new Error("VK не вернул сохранённую фотографию");
-    }
-
-    const savedPhoto = saveResult.response[0];
-    const attachment = `photo${savedPhoto.owner_id}_${savedPhoto.id}`;
-
-    console.log("Фото успешно сохранено:", attachment);
-
-    return attachment;
-  } catch (error) {
-    console.error("Ошибка обработки фотографии:", error);
-    return null;
-  }
+    form.append("photo", new Blob([buf], { type: r.headers.get("content-type") || "image/jpeg" }), "order-photo.jpg");
+    const up = await fetch(server.response.upload_url, { method: "POST", body: form });
+    const ur = await up.json();
+    if (!ur.server || !ur.photo || !ur.hash) throw new Error("upload failed");
+    const saved = await vkMethod("photos.saveMessagesPhoto", { server: ur.server, photo: ur.photo, hash: ur.hash });
+    const p = saved.response?.[0];
+    return p ? `photo${p.owner_id}_${p.id}` : null;
+  } catch (e) { console.error("photo:", e); return null; }
 }
 
 function mainKeyboard() {
-  return {
-    one_time: false,
-    buttons: [
-      [{
-        action: { type: "text", label: "🐾 Фигурка питомца" },
-        color: "primary"
-      }],
-      [{
-        action: { type: "text", label: "🎀 Брелок / подвеска" },
-        color: "primary"
-      }],
-      [{
-        action: { type: "text", label: "💍 Украшение" },
-        color: "primary"
-      }],
-      [{
-        action: { type: "text", label: "✨ Своя идея" },
-        color: "positive"
-      }]
-    ]
-  };
+  return { one_time:false, buttons:[
+    [{action:{type:"text",label:"🐾 Фигурка питомца"},color:"primary"}],
+    [{action:{type:"text",label:"🎀 Брелок / подвеска"},color:"primary"}],
+    [{action:{type:"text",label:"💍 Украшение"},color:"primary"}],
+    [{action:{type:"text",label:"✨ Своя идея"},color:"positive"}]
+  ]};
 }
-
 function cancelKeyboard() {
-  return {
-    one_time: false,
-    buttons: [[{
-      action: { type: "text", label: "❌ Отменить заказ" },
-      color: "negative"
-    }]]
-  };
+  return {one_time:false,buttons:[[{action:{type:"text",label:"❌ Отменить заказ"},color:"negative"}]]};
 }
-
 function quantityKeyboard() {
-  return {
-    one_time: true,
-    buttons: [
-      [
-        { action: { type: "text", label: "1" }, color: "primary" },
-        { action: { type: "text", label: "2" }, color: "primary" },
-        { action: { type: "text", label: "3" }, color: "primary" }
-      ],
-      [
-        { action: { type: "text", label: "4" }, color: "secondary" },
-        { action: { type: "text", label: "5+" }, color: "secondary" }
-      ],
-      [{
-        action: { type: "text", label: "❌ Отменить заказ" },
-        color: "negative"
-      }]
-    ]
-  };
+  return {one_time:true,buttons:[
+    [{action:{type:"text",label:"1"},color:"primary"},{action:{type:"text",label:"2"},color:"primary"},{action:{type:"text",label:"3"},color:"primary"}],
+    [{action:{type:"text",label:"4"},color:"secondary"},{action:{type:"text",label:"5+"},color:"secondary"}],
+    [{action:{type:"text",label:"❌ Отменить заказ"},color:"negative"}]
+  ]};
 }
-
-
-function adminOrderKeyboard(orderId) {
-  return {
-    one_time: false,
-    inline: true,
-    buttons: [
-      [
-        {
-          action: {
-            type: "callback",
-            label: "🟢 Принять заказ",
-            payload: JSON.stringify({
-              command: "accept_order",
-              order_id: orderId
-            })
-          },
-          color: "positive"
-        },
-        {
-          action: {
-            type: "callback",
-            label: "🔴 Отклонить",
-            payload: JSON.stringify({
-              command: "reject_order",
-              order_id: orderId
-            })
-          },
-          color: "negative"
-        }
-      ],
-      [
-        {
-          action: {
-            type: "callback",
-            label: "💬 Связаться с клиентом",
-            payload: JSON.stringify({
-              command: "contact_client",
-              order_id: orderId
-            })
-          },
-          color: "primary"
-        }
-      ]
-    ]
-  };
+function adminKeyboard(id) {
+  return {one_time:false,inline:true,buttons:[
+    [{action:{type:"callback",label:"🟢 Принять",payload:JSON.stringify({command:"accept",order_id:id})},color:"positive"},
+     {action:{type:"callback",label:"🔴 Отклонить",payload:JSON.stringify({command:"reject",order_id:id})},color:"negative"}],
+    [{action:{type:"callback",label:"🔨 В работе",payload:JSON.stringify({command:"status",status:"В работе",order_id:id})},color:"primary"},
+     {action:{type:"callback",label:"✅ Готов",payload:JSON.stringify({command:"status",status:"Готов",order_id:id})},color:"positive"}],
+    [{action:{type:"callback",label:"📦 Выдан",payload:JSON.stringify({command:"status",status:"Выдан",order_id:id})},color:"secondary"}]
+  ]};
 }
-
-
-function adminStatusKeyboard(orderId) {
-  return {
-    one_time: false,
-    inline: true,
-    buttons: [
-      [
-        {
-          action: {
-            type: "callback",
-            label: "🔨 В работе",
-            payload: JSON.stringify({
-              command: "status",
-              status: "В работе",
-              order_id: orderId
-            })
-          },
-          color: "primary"
-        },
-        {
-          action: {
-            type: "callback",
-            label: "✅ Готов",
-            payload: JSON.stringify({
-              command: "status",
-              status: "Готов",
-              order_id: orderId
-            })
-          },
-          color: "positive"
-        }
-      ],
-      [
-        {
-          action: {
-            type: "callback",
-            label: "📦 Выдан",
-            payload: JSON.stringify({
-              command: "status",
-              status: "Выдан",
-              order_id: orderId
-            })
-          },
-          color: "secondary"
-        }
-      ]
-    ]
-  };
+function makeId() { return `ORD-${new Date().toISOString().slice(0,10).replace(/-/g,"")}-${Math.random().toString(36).slice(2,7).toUpperCase()}`; }
+function getPhotoUrl(message) {
+  const a = Array.isArray(message?.attachments) ? message.attachments.find(x => x?.type === "photo" && x.photo) : null;
+  if (!a) return null;
+  const p = a.photo;
+  if (Array.isArray(p.sizes) && p.sizes.length) return [...p.sizes].sort((x,y)=>(y.width*y.height)-(x.width*x.height))[0].url;
+  return p.orig_photo?.url || null;
 }
-
-async function answerCallbackEvent(eventId, text) {
+async function answerEvent(eventId, text) {
   if (!eventId) return;
-
-  await vkMethod("messages.sendMessageEventAnswer", {
-    event_id: eventId,
-    user_id: ADMIN_ID,
-    peer_id: ADMIN_ID,
-    event_data: JSON.stringify({
-      type: "show_snackbar",
-      text
-    })
-  });
+  await vkMethod("messages.sendMessageEventAnswer", {event_id:eventId,user_id:ADMIN_ID,peer_id:ADMIN_ID,event_data:JSON.stringify({type:"show_snackbar",text})});
 }
+function money(n) { return `${Number(n||0).toLocaleString("ru-RU")} ₽`; }
+function findOrder(id) { return db.orders.find(o => o.id === id); }
 
-async function startOrder(userId, type) {
-  users[userId] = {
-    step: "photo",
-    type,
-    photo: null,
-    quantity: null,
-    details: null,
-    name: null,
-    contact: null
+async function notifyStatus(order) {
+  const messages = {
+    "Принят":"🧡 Ваш заказ принят!\n\nМы свяжемся с вами для уточнения деталей и стоимости.",
+    "В работе":"🔨 Ваш заказ перешёл в работу!\n\nМы уже занимаемся его изготовлением 🧡",
+    "Готов":"✅ Ваш заказ готов!\n\nСкоро свяжемся с вами по получению 🧡",
+    "Выдан":"📦 Заказ отмечен как выданный.\n\nСпасибо за заказ! Будем рады видеть вас снова 🧡",
+    "Отклонён":"Спасибо за обращение 🧡\n\nК сожалению, сейчас мы не можем принять этот заказ."
   };
-
-  await sendMessage(
-    userId,
-    `Отличный выбор! 🧡\n\nВы выбрали:\n${type}\n\n📸 Теперь отправьте фотографию или пример того, что хотите получить.\n\nЕсли фото не требуется — просто напишите «без фото».`,
-    cancelKeyboard()
-  );
+  if (messages[order.status]) await sendMessage(order.userId, messages[order.status]);
 }
 
-function getBestPhotoUrl(message) {
-  if (!Array.isArray(message?.attachments)) return null;
-
-  const photoAttachment = message.attachments.find(
-    attachment => attachment?.type === "photo" && attachment.photo
-  );
-
-  if (!photoAttachment) return null;
-
-  const photo = photoAttachment.photo;
-
-  if (Array.isArray(photo.sizes) && photo.sizes.length > 0) {
-    const sorted = [...photo.sizes].sort(
-      (a, b) => (b.width * b.height) - (a.width * a.height)
-    );
-
-    return sorted[0]?.url || null;
-  }
-
-  return photo.orig_photo?.url || null;
-}
-
-
-const orders = {};
-
-function makeOrderId() {
-  return `${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-}
-
-app.post("/callback", async (req, res) => {
+app.post("/callback", async (req,res) => {
   const data = req.body;
-
-  console.log("Получено событие:", data.type);
-
-  if (data.type === "confirmation") {
-    return res.send(VK_CONFIRMATION_CODE);
-  }
-
-  if (VK_SECRET && data.secret !== VK_SECRET) {
-    console.log("Неверный secret");
-    return res.status(403).send("forbidden");
-  }
-
-  // Нажатия inline-кнопок администратором
-  if (data.type === "message_event") {
-    try {
-      let payload = data.object?.payload;
-
-      if (typeof payload === "string") {
-        try {
-          payload = JSON.parse(payload);
-        } catch {
-          payload = {};
-        }
-      }
-
-      const orderId = payload?.order_id;
-      const command = payload?.command;
-      const order = orderId ? orders[orderId] : null;
-
-      if (!order) {
-        await answerCallbackEvent(data.event_id, "Заявка уже обработана или не найдена");
-        return res.send("ok");
-      }
-
-      if (command === "status") {
-        const allowedStatuses = ["В работе", "Готов", "Выдан"];
-
-        if (!allowedStatuses.includes(payload?.status)) {
-          await answerCallbackEvent(data.event_id, "Неизвестный статус");
-          return res.send("ok");
-        }
-
-        order.status = payload.status;
-
-        const clientMessages = {
-          "В работе":
-            "🔨 Ваш заказ перешёл в работу!\n\nМы уже занимаемся его изготовлением 🧡",
-          "Готов":
-            "✅ Ваш заказ готов!\n\nСкоро свяжемся с вами, чтобы обсудить получение 🧡",
-          "Выдан":
-            "📦 Ваш заказ отмечен как выданный.\n\nСпасибо за заказ! Будем рады видеть вас снова 🧡"
-        };
-
-        await sendMessage(
-          order.userId,
-          clientMessages[order.status]
-        );
-
-        await sendMessage(
-          ADMIN_ID,
-          `📌 Статус заказа ${orderId} изменён.\n\n` +
-          `Новый статус: ${order.status}\n` +
-          `Клиент: ${order.name}\n` +
-          `Изделие: ${order.type}`,
-          order.status === "Выдан"
-            ? null
-            : adminStatusKeyboard(orderId)
-        );
-
-        await answerCallbackEvent(
-          data.event_id,
-          `Статус: ${order.status}`
-        );
-
-        return res.send("ok");
-      }
-
-      if (command === "accept_order") {
-        order.status = "Принят";
-
-        await sendMessage(
-          order.userId,
-          "🧡 Ваш заказ принят!\n\nМы начинаем его подготовку. Скоро свяжемся с вами, чтобы обсудить детали и стоимость."
-        );
-
-        await sendMessage(
-          ADMIN_ID,
-          `🟢 Заказ ${orderId} принят.\n\nКлиент: ${order.name}\nИзделие: ${order.type}\n\nТеперь можно менять статус:`,
-          adminStatusKeyboard(orderId)
-        );
-
-        await answerCallbackEvent(data.event_id, "Заказ принят 🟢");
-      }
-
-      if (command === "reject_order") {
-        order.status = "Отклонён";
-
-        await sendMessage(
-          order.userId,
-          "Спасибо за обращение 🧡\n\nК сожалению, сейчас мы не можем принять этот заказ.\n\nЕсли обстоятельства изменятся — будем рады вашему обращению."
-        );
-
-        await sendMessage(
-          ADMIN_ID,
-          `🔴 Заказ ${orderId} отклонён.\n\nКлиент: ${order.name}\nИзделие: ${order.type}`
-        );
-
-        await answerCallbackEvent(data.event_id, "Заказ отклонён 🔴");
-      }
-
-      if (command === "contact_client") {
-        order.status = order.status || "Новая";
-
-        await answerCallbackEvent(
-          data.event_id,
-          `VK ID клиента: ${order.userId}`
-        );
-
-        await sendMessage(
-          ADMIN_ID,
-          `💬 Клиент для связи:\n\n👤 ${order.name}\n🔗 VK ID: ${order.userId}\n\nОткройте диалог с клиентом в сообществе.`
-        );
-      }
-
-      return res.send("ok");
-    } catch (error) {
-      console.error("Ошибка обработки кнопки:", error);
-      return res.send("ok");
-    }
-  }
-
-  if (data.type !== "message_new") {
-    return res.send("ok");
-  }
+  if (data.type === "confirmation") return res.send(VK_CONFIRMATION_CODE);
+  if (VK_SECRET && data.secret !== VK_SECRET) return res.status(403).send("forbidden");
 
   try {
-    const message = data.object?.message || data.object;
-    const userId = message.from_id;
-    const text = (message.text || "").trim();
+    if (data.type === "message_event") {
+      let p = data.object?.payload;
+      if (typeof p === "string") { try { p = JSON.parse(p); } catch { p = {}; } }
+      const o = findOrder(p?.order_id);
+      if (!o) { await answerEvent(data.event_id,"Заявка не найдена"); return res.send("ok"); }
 
-    console.log(
-      "Новое сообщение:",
-      userId,
-      text,
-      "attachments:",
-      Array.isArray(message.attachments) ? message.attachments.length : 0
-    );
+      if (p.command === "accept") o.status = "Принят";
+      else if (p.command === "reject") o.status = "Отклонён";
+      else if (p.command === "status" && ["В работе","Готов","Выдан"].includes(p.status)) o.status = p.status;
+      else { await answerEvent(data.event_id,"Неизвестная команда"); return res.send("ok"); }
+
+      o.updatedAt = new Date().toISOString();
+      if (o.status === "Принят") db.stats.accepted++;
+      if (o.status === "Отклонён") db.stats.rejected++;
+      if (o.status === "Выдан") db.stats.completed++;
+      saveDb();
+      await notifyStatus(o);
+      await answerEvent(data.event_id, `Статус: ${o.status}`);
+      await sendMessage(ADMIN_ID, `📌 Заказ ${o.id}\nСтатус: ${o.status}\nКлиент: ${o.name}\nСумма: ${money(o.total)}`, adminKeyboard(o.id));
+      return res.send("ok");
+    }
+
+    if (data.type !== "message_new") return res.send("ok");
+    const m = data.object?.message || data.object;
+    const userId = m.from_id;
+    const text = (m.text || "").trim();
 
     if (text === "❌ Отменить заказ") {
       delete users[userId];
-
-      await sendMessage(
-        userId,
-        "Заказ отменён ❌\n\nЕсли захотите оформить заказ — просто напишите мне снова 🧡",
-        mainKeyboard()
-      );
-
+      await sendMessage(userId,"Заказ отменён ❌\n\nЕсли захотите оформить заказ — напишите нам снова 🧡",mainKeyboard());
       return res.send("ok");
     }
 
     if (!users[userId]) {
-      users[userId] = { step: "type" };
-
-      await sendMessage(
-        userId,
-        "Привет! 🧡\n\nДобро пожаловать в нашу мастерскую ручной работы!\n\nМы создаём фигурки питомцев, брелоки, украшения и воплощаем индивидуальные идеи ✨\n\nЧто хотите заказать?",
-        mainKeyboard()
-      );
-
+      users[userId] = {step:"type"};
+      await sendMessage(userId,"Привет! 🧡\n\nДобро пожаловать в нашу мастерскую ручной работы!\n\nЧто хотите заказать?",mainKeyboard());
       return res.send("ok");
     }
 
-    const user = users[userId];
+    const u = users[userId];
 
-    if (user.step === "type") {
-      if (text.includes("Фигурка питомца")) {
-        await startOrder(userId, "🐾 Фигурка домашнего питомца");
-      } else if (text.includes("Брелок")) {
-        await startOrder(userId, "🎀 Брелок / подвеска");
-      } else if (text.includes("Украшение")) {
-        await startOrder(userId, "💍 Украшение");
-      } else if (text.includes("Своя идея")) {
-        await startOrder(userId, "✨ Индивидуальный заказ");
-      } else {
-        await sendMessage(
-          userId,
-          "Пожалуйста, выберите вариант ниже 👇",
-          mainKeyboard()
-        );
-      }
-
+    if (u.step === "type") {
+      let type = text.includes("Фигурка питомца") ? "🐾 Фигурка домашнего питомца" :
+        text.includes("Брелок") ? "🎀 Брелок / подвеска" :
+        text.includes("Украшение") ? "💍 Украшение" :
+        text.includes("Своя идея") ? "✨ Индивидуальный заказ" : null;
+      if (!type) await sendMessage(userId,"Пожалуйста, выберите вариант ниже 👇",mainKeyboard());
+      else { u.type=type; u.step="photo"; await sendMessage(userId,`Отличный выбор! 🧡\n\n${type}\n\n📸 Отправьте фотографию или пример.\n\nЕсли фото не требуется — напишите «без фото».`,cancelKeyboard()); }
       return res.send("ok");
     }
 
-    if (user.step === "photo") {
-      const photoUrl = getBestPhotoUrl(message);
-
-      if (photoUrl) {
-        console.log("Фото найдено. Загружаем его в VK...");
-
-        const savedAttachment = await uploadClientPhoto(photoUrl);
-
-        if (savedAttachment) {
-          user.photo = savedAttachment;
-          user.step = "quantity";
-
-          await sendMessage(
-            userId,
-            "Фото получила! 📸✨\n\nСколько изделий вы хотите заказать?",
-            quantityKeyboard()
-          );
-        } else {
-          await sendMessage(
-            userId,
-            "Я увидела фотографию, но не смогла сохранить её 😔\n\nПопробуйте отправить фото ещё раз.",
-            cancelKeyboard()
-          );
-        }
-      } else if (
-        text.toLowerCase() === "без фото" ||
-        text.toLowerCase() === "без фотографии"
-      ) {
-        user.photo = null;
-        user.step = "quantity";
-
-        await sendMessage(
-          userId,
-          "Хорошо 😊\n\nСколько изделий вы хотите заказать?",
-          quantityKeyboard()
-        );
-      } else {
-        await sendMessage(
-          userId,
-          "Мне нужна фотография или пример изделия 📸\n\nЕсли фотография не нужна — напишите «без фото».",
-          cancelKeyboard()
-        );
-      }
-
+    if (u.step === "photo") {
+      const url = getPhotoUrl(m);
+      if (url) {
+        u.photo = await uploadClientPhoto(url);
+        if (!u.photo) { await sendMessage(userId,"Не удалось сохранить фото 😔\n\nПопробуйте отправить его ещё раз.",cancelKeyboard()); return res.send("ok"); }
+        u.step="quantity"; await sendMessage(userId,"Фото получила! 📸✨\n\nСколько изделий?",quantityKeyboard());
+      } else if (/^без фото$/i.test(text)) {
+        u.photo=null; u.step="quantity"; await sendMessage(userId,"Хорошо 😊\n\nСколько изделий?",quantityKeyboard());
+      } else await sendMessage(userId,"Отправьте фотографию 📸 или напишите «без фото».",cancelKeyboard());
       return res.send("ok");
     }
 
-    if (user.step === "quantity") {
-      if (["1", "2", "3", "4", "5+"].includes(text)) {
-        user.quantity = text;
-        user.step = "details";
-
-        await sendMessage(
-          userId,
-          "Отлично! ✨\n\nТеперь расскажите подробнее о заказе 💭\n\nКакой цвет, размер, оформление или другие пожелания вы хотите?",
-          cancelKeyboard()
-        );
-      } else {
-        await sendMessage(
-          userId,
-          "Пожалуйста, выберите количество кнопкой ниже 👇",
-          quantityKeyboard()
-        );
-      }
-
+    if (u.step === "quantity") {
+      if (!["1","2","3","4","5+"].includes(text)) { await sendMessage(userId,"Выберите количество кнопкой 👇",quantityKeyboard()); return res.send("ok"); }
+      u.quantity=text; u.step="details"; await sendMessage(userId,"Расскажите подробнее о заказе 💭\n\nЦвет, размер, оформление и другие пожелания.",cancelKeyboard()); return res.send("ok");
+    }
+    if (u.step === "details") { u.details=text; u.step="name"; await sendMessage(userId,"Как вас зовут?",cancelKeyboard()); return res.send("ok"); }
+    if (u.step === "name") { u.name=text; u.step="contact"; await sendMessage(userId,"Оставьте удобный способ связи: VK, телефон или Telegram.",cancelKeyboard()); return res.send("ok"); }
+    if (u.step === "contact") {
+      u.contact=text;
+      u.step="price";
+      await sendMessage(userId,"Почти готово 🧡\n\nЕсли знаете желаемую стоимость/бюджет — напишите её. Если нет, напишите «не знаю».",cancelKeyboard());
       return res.send("ok");
     }
-
-    if (user.step === "details") {
-      user.details = text;
-      user.step = "name";
-
-      await sendMessage(
-        userId,
-        "Почти готово 🧡\n\nКак вас зовут?",
-        cancelKeyboard()
-      );
-
+    if (u.step === "price") {
+      const parsed = Number(text.replace(/\s/g,"").replace(/[^\d.,]/g,"").replace(",","."));
+      u.budget = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+      u.step="deadline";
+      await sendMessage(userId,"📅 Когда примерно нужен заказ?\n\nНапример: «до 15 сентября» или «не срочно».",cancelKeyboard());
       return res.send("ok");
     }
-
-    if (user.step === "name") {
-      user.name = text;
-      user.step = "contact";
-
-      await sendMessage(
-        userId,
-        "И последний вопрос 😊\n\nОставьте удобный способ связи: VK, телефон или Telegram.",
-        cancelKeyboard()
-      );
-
-      return res.send("ok");
-    }
-
-    if (user.step === "contact") {
-      user.contact = text;
-
-      const orderId = makeOrderId();
-
-      orders[orderId] = {
-        userId,
-        type: user.type,
-        quantity: user.quantity,
-        details: user.details,
-        name: user.name,
-        contact: user.contact,
-        photo: user.photo,
-        status: "Новая",
-        createdAt: new Date().toISOString()
+    if (u.step === "deadline") {
+      const order = {
+        id: makeId(), userId, type:u.type, photo:u.photo, quantity:u.quantity,
+        details:u.details, name:u.name, contact:u.contact, budget:u.budget || 0,
+        price:0, prepayment:0, total:0, deadline:text, status:"Новая",
+        createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
       };
+      db.orders.unshift(order); db.stats.created++; saveDb();
 
-      const orderText =
-        `🆕 НОВАЯ ЗАЯВКА\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `🆔 Заказ: ${orderId}\n\n` +
-        `📦 Изделие:\n${user.type}\n\n` +
-        `🔢 Количество:\n${user.quantity}\n\n` +
-        `💬 Пожелания:\n${user.details || "Не указаны"}\n\n` +
-        `👤 Имя:\n${user.name}\n\n` +
-        `📱 Контакт:\n${user.contact}\n\n` +
-        `🔗 VK ID клиента:\n${userId}\n\n` +
-        `📌 Статус: Новая\n\n` +
-        `━━━━━━━━━━━━━━━━━━`;
-
-      await sendMessage(
-        ADMIN_ID,
-        orderText,
-        adminOrderKeyboard(orderId)
-      );
-
-      if (user.photo) {
-        const photoResult = await sendMessage(
-          ADMIN_ID,
-          "📸 Фото / пример к заказу:",
-          null,
-          user.photo
-        );
-
-        console.log("Результат отправки фото админу:", photoResult);
-      }
-
-      await sendMessage(
-        userId,
-        "🎉 Спасибо! Ваша заявка отправлена!\n\nМы всё получили и скоро свяжемся с вами, чтобы обсудить детали и стоимость 🧡\n\nЕсли захотите оформить ещё один заказ — просто напишите нам.",
-        mainKeyboard()
-      );
-
+      const msg =
+        `🆕 НОВАЯ ЗАЯВКА\n━━━━━━━━━━━━━━━━━━\n\n`+
+        `🆔 ${order.id}\n📦 ${order.type}\n🔢 ${order.quantity}\n\n`+
+        `💬 ${order.details || "Не указаны"}\n\n👤 ${order.name}\n📱 ${order.contact}\n`+
+        `💰 Бюджет: ${money(order.budget)}\n📅 Срок: ${order.deadline}\n📌 Статус: Новая`;
+      await sendMessage(ADMIN_ID,msg,adminKeyboard(order.id));
+      if (order.photo) await sendMessage(ADMIN_ID,"📸 Фото / пример к заказу:",null,order.photo);
+      await sendMessage(userId,"🎉 Спасибо! Заявка отправлена!\n\nМы всё получили и скоро свяжемся с вами для уточнения стоимости и сроков 🧡",mainKeyboard());
       delete users[userId];
-
       return res.send("ok");
     }
-
     return res.send("ok");
-  } catch (error) {
-    console.error("Ошибка обработки сообщения:", error);
+  } catch(e) {
+    console.error("callback error:",e);
     return res.send("ok");
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`VK Order Bot запущен на порту ${PORT}`);
+app.post("/admin/order/:id", async (req,res) => {
+  const o = findOrder(req.params.id);
+  if (!o) return res.status(404).json({error:"not found"});
+  const allowed = ["Новая","Принят","В работе","Готов","Выдан","Отклонён"];
+  if (req.body.status && allowed.includes(req.body.status)) o.status=req.body.status;
+  for (const k of ["price","prepayment","total","deadline"]) if (req.body[k] !== undefined) o[k]=req.body[k];
+  o.updatedAt=new Date().toISOString();
+  if (o.total) db.stats.revenue = db.orders.reduce((s,x)=>s+Number(x.total||0),0);
+  saveDb();
+  if (req.body.status) await notifyStatus(o);
+  res.json(o);
 });
+
+app.listen(PORT, () => console.log(`VK Order Bot 2.0 запущен на порту ${PORT}`));
