@@ -1,6 +1,8 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const { initializeApp, cert } = require("firebase-admin/app");
+const { getMessaging } = require("firebase-admin/messaging");
 
 const app = express();
 app.use(express.json());
@@ -13,6 +15,30 @@ const VK_SECRET = process.env.VK_SECRET;
 const VK_CONFIRMATION_CODE = process.env.VK_CONFIRMATION_CODE;
 const CRM_KEY = process.env.CRM_KEY || "change-me";
 const GOOGLE_SHEETS_URL = process.env.GOOGLE_SHEETS_URL;
+
+let firebaseAdmin = null;
+
+if (
+  process.env.FIREBASE_PROJECT_ID &&
+  process.env.FIREBASE_CLIENT_EMAIL &&
+  process.env.FIREBASE_PRIVATE_KEY
+) {
+  try {
+    firebaseAdmin = initializeApp({
+      credential: cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
+      })
+    });
+
+    console.log("Firebase Admin initialized");
+  } catch (e) {
+    console.error("Firebase Admin init error:", e);
+  }
+} else {
+  console.warn("Firebase Admin env vars not configured; push disabled");
+}
 
 const DB_FILE = path.join(__dirname, "orders.json");
 const users = {};
@@ -282,6 +308,31 @@ async function notifyStatus(order) {
   if (messages[order.status]) await sendMessage(order.userId, messages[order.status]);
 }
 
+async function sendNewOrderPush(order) {
+  if (!firebaseAdmin) {
+    console.warn("FCM push пропущен: Firebase Admin не настроен");
+    return;
+  }
+
+  try {
+    const response = await getMessaging(firebaseAdmin).send({
+      topic: "admin_orders",
+      notification: {
+        title: `🆕 Новый заказ #${order.id}`,
+        body: `${order.name || "Новый клиент"} • ${order.type || "Заказ"}`
+      },
+      data: {
+        orderId: String(order.id),
+        status: String(order.status || "Новая")
+      }
+    });
+
+    console.log("FCM push sent:", response);
+  } catch (e) {
+    console.error("FCM push error:", e);
+  }
+}
+
 app.post("/callback", async (req, res) => {
   const data = req.body;
 
@@ -496,9 +547,14 @@ app.post("/callback", async (req, res) => {
       };
 
       // Сначала сохраняем в локальную CRM.
-      db.orders.unshift(order);
-      db.stats.created++;
-      saveDb();
+     db.orders.unshift(order);
+db.stats.created++;
+saveDb();
+
+// Отправляем push на Android.
+await sendNewOrderPush(order);
+
+// Затем отправляем тот же заказ в Google Sheets.
 
       // Затем отправляем тот же заказ в Google Sheets.
       // Если Google временно недоступен, VK-бот всё равно продолжит работать.
