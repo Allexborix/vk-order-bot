@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VK Order CRM</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f4f6f8;margin:0;color:#17212b}.wrap{max-width:1200px;margin:auto;padding:24px}
+h1{margin-top:0}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card{background:white;border-radius:14px;padding:18px;box-shadow:0 2px 10px #0001}.num{font-size:28px;font-weight:700}
+.toolbar{display:flex;gap:10px;margin:20px 0;flex-wrap:wrap}input,select,button{padding:10px;border:1px solid #ccd3da;border-radius:9px}button{cursor:pointer;background:#fff}.orders{display:grid;gap:12px}.order{background:#fff;border-radius:14px;padding:18px;box-shadow:0 2px 10px #0001}.row{display:flex;justify-content:space-between;gap:15px;flex-wrap:wrap}.tag{padding:6px 10px;border-radius:20px;background:#eef2f5}.actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}.actions button{font-weight:600}.money{font-weight:700}small{color:#667}.hidden{display:none}
+@media(max-width:800px){.cards{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body><div class="wrap">
+<h1>🧡 Заказы VK</h1>
+<div class="cards">
+<div class="card"><small>Всего заказов</small><div class="num" id="created">0</div></div>
+<div class="card"><small>Принято</small><div class="num" id="accepted">0</div></div>
+<div class="card"><small>Выполнено</small><div class="num" id="completed">0</div></div>
+<div class="card"><small>Выручка</small><div class="num" id="revenue">0 ₽</div></div>
+</div>
+<div class="toolbar">
+<input id="key" placeholder="CRM_KEY">
+<button onclick="load()">Обновить</button>
+<input id="search" placeholder="Поиск по имени / ID / изделию" oninput="render()">
+<select id="filter" onchange="render()"><option value="">Все статусы</option><option>Новая</option><option>Принят</option><option>В работе</option><option>Готов</option><option>Выдан</option><option>Отклонён</option></select>
+</div>
+<div id="orders" class="orders"></div>
+</div>
+<script>
+let db={orders:[],stats:{}}; let key=localStorage.crmKey||""; document.getElementById("key").value=key;
+function headers(){return {"x-crm-key":document.getElementById("key").value}}
+async function load(){key=document.getElementById("key").value;localStorage.crmKey=key;let r=await fetch("/admin/data",{headers:headers()});if(!r.ok){alert("Неверный CRM_KEY");return}db=await r.json();document.getElementById("created").textContent=db.orders.length;document.getElementById("accepted").textContent=db.orders.filter(o=>o.status==="Принят").length;document.getElementById("completed").textContent=db.orders.filter(o=>o.status==="Выдан").length;document.getElementById("revenue").textContent=(db.orders.reduce((s,o)=>s+Number(o.total||0),0)).toLocaleString("ru-RU")+" ₽";render()}
+function money(n){return Number(n||0).toLocaleString("ru-RU")+" ₽"}
+function render(){let q=document.getElementById("search").value.toLowerCase(),f=document.getElementById("filter").value;let arr=db.orders.filter(o=>(!f||o.status===f)&&(!q||JSON.stringify(o).toLowerCase().includes(q)));document.getElementById("orders").innerHTML=arr.map(o=>`<div class="order"><div class="row"><div><b>${o.id}</b><br><small>${new Date(o.createdAt).toLocaleString("ru-RU")}</small></div><span class="tag">${o.status}</span></div><p>📦 <b>${o.type}</b> × ${o.quantity}</p><p>👤 ${o.name} · VK ${o.userId}</p><p>💬 ${o.details||"—"}</p><p>📅 ${o.deadline||"—"}</p><p>💰 Цена: <span class="money">${money(o.total)}</span> · Предоплата: ${money(o.prepayment)} · Остаток: ${money(Number(o.total||0)-Number(o.prepayment||0))}</p><div class="actions">${["Новая","Принят","В работе","Готов","Выдан","Отклонён"].map(s=>`<button onclick="status('${o.id}','${s}')">${s}</button>`).join("")}<button onclick="editPrice('${o.id}',${o.total||0},${o.prepayment||0})">💰 Цена</button></div></div>`).join("")||"<div class='card'>Заказов нет</div>"}
+async function status(id,s){await fetch("/admin/order/"+id,{method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({status:s})});load()}
+async function editPrice(id,total,prepayment){let t=prompt("Итоговая цена:",total);if(t===null)return;let p=prompt("Предоплата:",prepayment);if(p===null)return;await fetch("/admin/order/"+id,{method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({total:Number(t),prepayment:Number(p)})});load()}
+load();
+</script>
+</body></html>
