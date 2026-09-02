@@ -1,7 +1,7 @@
 {
-  "name": "vk-order-bot",
-  "version": "1.0.0",
-  "description": "Бот для приема заказов ВК",
+  "name": "vk-order-bot-v2",
+  "version": "2.0.0",
+  "description": "VK order bot with mini CRM",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
